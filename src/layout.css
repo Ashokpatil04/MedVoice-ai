@@ -1,0 +1,156 @@
+import { useEffect, useRef, useState } from "react";
+
+function humanizeError(errorType) {
+  const errorMap = {
+    "not-allowed": "Microphone permission was denied. Allow microphone access in your browser site settings.",
+    "service-not-allowed": "Speech recognition is blocked by the browser or OS settings.",
+    "no-speech": "No speech was detected. Try speaking a little closer to the microphone.",
+    "audio-capture": "No microphone was found. Check whether your microphone is connected and enabled.",
+    "network": "Speech recognition hit a network issue. Please try again.",
+    unsupported: "This browser does not support live speech recognition. Use Chrome or Edge on desktop.",
+    insecure: "Microphone access needs a secure local page. Open the app from localhost.",
+    busy: "Microphone is already starting. Please wait a moment.",
+    unknown: "Microphone could not be started. Please try again."
+  };
+
+  return errorMap[errorType] || errorMap.unknown;
+}
+
+export default function useRealtimeSpeech() {
+  const recognitionRef = useRef(null);
+  const startLockRef = useRef(false);
+  const manualStopRef = useRef(false);
+  const shouldRestartRef = useRef(false);
+  const [supported, setSupported] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [requestingPermission, setRequestingPermission] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [language, setLanguage] = useState("en-US");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setSupported(false);
+      setError(humanizeError("unsupported"));
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = language;
+    recognition.onstart = () => {
+      setListening(true);
+      setRequestingPermission(false);
+      setError("");
+      startLockRef.current = false;
+      manualStopRef.current = false;
+      shouldRestartRef.current = true;
+    };
+    recognition.onend = () => {
+      if (shouldRestartRef.current && !manualStopRef.current) {
+        try {
+          recognition.start();
+          return;
+        } catch {
+          shouldRestartRef.current = false;
+        }
+      }
+
+      setListening(false);
+      setRequestingPermission(false);
+      startLockRef.current = false;
+    };
+    recognition.onerror = (event) => {
+      if (event.error === "no-speech") {
+        setRequestingPermission(false);
+        startLockRef.current = false;
+        return;
+      }
+
+      shouldRestartRef.current = false;
+      setError(humanizeError(event.error));
+      setListening(false);
+      setRequestingPermission(false);
+      startLockRef.current = false;
+    };
+    recognition.onresult = (event) => {
+      let nextText = "";
+      for (let index = 0; index < event.results.length; index += 1) {
+        nextText += event.results[index][0].transcript;
+      }
+      setTranscript(nextText.trim());
+    };
+
+    recognitionRef.current = recognition;
+    setSupported(true);
+    setError("");
+
+    return () => {
+      shouldRestartRef.current = false;
+      recognition.stop();
+    };
+  }, [language]);
+
+  const start = async () => {
+    if (startLockRef.current || listening) {
+      return;
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setError(humanizeError("unsupported"));
+      return;
+    }
+
+    if (!window.isSecureContext && window.location.hostname !== "localhost") {
+      setError(humanizeError("insecure"));
+      return;
+    }
+
+    try {
+      startLockRef.current = true;
+      setRequestingPermission(true);
+      setError("");
+      setTranscript("");
+      manualStopRef.current = false;
+      shouldRestartRef.current = true;
+      const permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      permissionStream.getTracks().forEach((track) => track.stop());
+      recognitionRef.current?.start();
+    } catch (permissionError) {
+      shouldRestartRef.current = false;
+      const normalized = permissionError?.name === "NotAllowedError"
+        ? "not-allowed"
+        : permissionError?.name === "NotFoundError"
+          ? "audio-capture"
+          : "unknown";
+      setError(humanizeError(normalized));
+      setRequestingPermission(false);
+      startLockRef.current = false;
+    }
+  };
+
+  const stop = () => {
+    manualStopRef.current = true;
+    shouldRestartRef.current = false;
+    recognitionRef.current?.stop();
+    setRequestingPermission(false);
+    startLockRef.current = false;
+  };
+
+  return {
+    supported,
+    listening,
+    requestingPermission,
+    transcript,
+    language,
+    error,
+    setLanguage,
+    setTranscript,
+    setError,
+    start,
+    stop
+  };
+}

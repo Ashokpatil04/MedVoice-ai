@@ -1,0 +1,33 @@
+export default function Navbar({ items, active, setActive, onLogout, role, userName, pathMap = {} }) {
+  return (
+    <header className="topbar cinematic-nav">
+      <div className="brand-cluster">
+        <div className="brand-emblem">MV</div>
+        <div>
+          <p className="overline brand-title">MedVoice-AI</p>
+          <p className="nav-subtitle">{role === "DOCTOR" ? "Clinical Intelligence Workspace" : "Patient Voice Companion"}</p>
+        </div>
+      </div>
+
+      <nav className="nav-list nav-pill-list">
+        {items.map((item) => (
+          <button
+            key={item}
+            className={active === item ? "nav-btn active" : "nav-btn"}
+            onClick={() => setActive(item, pathMap[item])}
+          >
+            {item}
+          </button>
+        ))}
+      </nav>
+
+      <div className="nav-side-panel">
+        <div className="nav-user-chip">
+          <span className="nav-user-label">Live User</span>
+          <strong>{userName}</strong>
+        </div>
+        <button className="logout-btn" onClick={onLogout}>Logout</button>
+      </div>
+    </header>
+  );
+}

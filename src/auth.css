@@ -1,0 +1,1036 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../api";
+import useRealtimeSpeech from "../hooks/useRealtimeSpeech";
+import Navbar from "./Navbar";
+
+const patientPathMap = {
+  Home: "/patient/home",
+  Translation: "/patient/translation",
+  Reports: "/patient/reports",
+  About: "/patient/about"
+};
+
+const speechLocales = {
+  en: "en-US",
+  hi: "hi-IN",
+  kn: "kn-IN"
+};
+
+const commonMedicalTerms = [
+  "fever", "cough", "headache", "body pain", "fatigue", "vomiting", "infection",
+  "pressure", "cold", "dizziness", "nausea", "sore throat", "dehydration", "chest pain",
+  "cbc", "cdc", "widal", "blood test", "paracetamol", "dolo", "dolo 650", "tablet"
+];
+
+const symptomTerms = [
+  "fever", "cough", "headache", "body pain", "fatigue", "vomiting", "infection",
+  "pressure", "cold", "dizziness", "nausea", "sore throat", "dehydration", "chest pain"
+];
+
+const kannadaTerms = {
+  fever: "\u0c9c\u0ccd\u0cb5\u0cb0",
+  cough: "\u0c95\u0cc6\u0cae\u0ccd\u0cae\u0cc1",
+  headache: "\u0ca4\u0cb2\u0cc6\u0ca8\u0ccb\u0cb5\u0cc1",
+  "body pain": "\u0ca6\u0cc7\u0cb9\u0ca6 \u0ca8\u0ccb\u0cb5\u0cc1",
+  fatigue: "\u0ca6\u0ccc\u0cb0\u0ccd\u0cac\u0cb2\u0ccd\u0caf",
+  vomiting: "\u0c9b\u0cb0\u0ccd\u0ca1\u0cbf",
+  infection: "\u0cb8\u0c82\u0c95\u0ccd\u0cb0\u0cae\u0ca3",
+  cold: "\u0c9c\u0cb2\u0ca6\u0ccb\u0cb7",
+  "blood test": "\u0cb0\u0c95\u0ccd\u0ca4 \u0caa\u0cb0\u0cc0\u0c95\u0ccd\u0cb7\u0cc6",
+  widal: "\u0cb5\u0cbf\u0ca1\u0cbe\u0cb2\u0ccd \u0caa\u0cb0\u0cc0\u0c95\u0ccd\u0cb7\u0cc6",
+  cbc: "\u0cb8\u0cbf\u0cac\u0cbf\u0cb8\u0cbf \u0caa\u0cb0\u0cc0\u0c95\u0ccd\u0cb7\u0cc6",
+  cdc: "\u0cb8\u0cbf\u0ca1\u0cbf\u0cb8\u0cbf \u0caa\u0cb0\u0cc0\u0c95\u0ccd\u0cb7\u0cc6",
+  paracetamol: "\u0caa\u0ccd\u0caf\u0cbe\u0cb0\u0cbe\u0cb8\u0cbf\u0c9f\u0cae\u0cbe\u0cb2\u0ccd",
+  dolo: "\u0ca1\u0cca\u0cb2\u0cca",
+  "dolo 650": "\u0ca1\u0cca\u0cb2\u0cca 650"
+};
+
+const hindiTerms = {
+  fever: "\u092c\u0941\u0916\u093e\u0930",
+  cough: "\u0916\u093e\u0902\u0938\u0940",
+  headache: "\u0938\u093f\u0930\u0926\u0930\u094d\u0926",
+  "body pain": "\u0936\u0930\u0940\u0930 \u0926\u0930\u094d\u0926",
+  fatigue: "\u0925\u0915\u093e\u0928",
+  vomiting: "\u0909\u0932\u094d\u091f\u0940",
+  infection: "\u0938\u0902\u0915\u094d\u0930\u092e\u0923",
+  cold: "\u091c\u0941\u0915\u093e\u092e",
+  "blood test": "\u092c\u094d\u0932\u0921 \u091f\u0947\u0938\u094d\u091f",
+  widal: "\u0935\u093f\u0921\u093e\u0932 \u091f\u0947\u0938\u094d\u091f",
+  cbc: "\u0938\u0940\u092c\u0940\u0938\u0940 \u091f\u0947\u0938\u094d\u091f",
+  cdc: "\u0938\u0940\u0921\u0940\u0938\u0940 \u091f\u0947\u0938\u094d\u091f",
+  paracetamol: "\u092a\u0948\u0930\u093e\u0938\u093f\u091f\u093e\u092e\u094b\u0932",
+  dolo: "\u0921\u094b\u0932\u094b",
+  "dolo 650": "\u0921\u094b\u0932\u094b 650"
+};
+
+const kannadaToEnglishTerms = Object.fromEntries(
+  Object.entries(kannadaTerms).map(([english, localized]) => [localized, english])
+);
+
+const hindiToEnglishTerms = Object.fromEntries(
+  Object.entries(hindiTerms).map(([english, localized]) => [localized, english])
+);
+
+function loadSpeechVoices() {
+  if (!window.speechSynthesis) {
+    return Promise.resolve([]);
+  }
+
+  const existingVoices = window.speechSynthesis.getVoices();
+  if (existingVoices.length) {
+    return Promise.resolve(existingVoices);
+  }
+
+  return new Promise((resolve) => {
+    const finish = () => {
+      const voices = window.speechSynthesis.getVoices();
+      resolve(voices);
+    };
+
+    const timeoutId = window.setTimeout(finish, 1200);
+    window.speechSynthesis.onvoiceschanged = () => {
+      window.clearTimeout(timeoutId);
+      finish();
+    };
+  });
+}
+
+async function speakTranslatedText(text, languageCode) {
+  if (!window.speechSynthesis || !text?.trim()) {
+    return;
+  }
+
+  const spokenText = text
+    .replace(/\s+/g, " ")
+    .replace(/([0-9]+)/g, " $1 ")
+    .trim();
+  const utterance = new SpeechSynthesisUtterance(spokenText);
+  const locale = speechLocales[languageCode] || "en-US";
+  utterance.lang = locale;
+  utterance.rate = 0.92;
+  utterance.pitch = 1;
+
+  const availableVoices = await loadSpeechVoices();
+  const normalizedLocale = locale.toLowerCase();
+  const localePrefix = normalizedLocale.split("-")[0];
+  const matchingVoice = availableVoices.find((voice) => voice.lang?.toLowerCase() === normalizedLocale)
+    || availableVoices.find((voice) => voice.lang?.toLowerCase().startsWith(`${localePrefix}-`))
+    || availableVoices.find((voice) => voice.lang?.toLowerCase() === localePrefix);
+
+  if (matchingVoice) {
+    utterance.voice = matchingVoice;
+  }
+
+  window.speechSynthesis.cancel();
+  await new Promise((resolve) => window.setTimeout(resolve, 120));
+  window.speechSynthesis.speak(utterance);
+}
+
+function extractFallbackMedicalTerms(text) {
+  const lowered = (text || "").toLowerCase();
+  const found = commonMedicalTerms.filter((term) => lowered.includes(term));
+  return found;
+}
+
+function extractFallbackSymptoms(text) {
+  const lowered = (text || "").toLowerCase();
+  return symptomTerms.filter((term) => lowered.includes(term)).map((term) => term.charAt(0).toUpperCase() + term.slice(1));
+}
+
+function extractFallbackDuration(text) {
+  return /(?:last|past|for)\s+\d+\s+(?:day|days|week|weeks|month|months|hour|hours)/i.exec(text || "")?.[0] || "Not clearly mentioned";
+}
+
+function extractLocalizedDuration(text, sourceLanguage) {
+  const value = text || "";
+  if (sourceLanguage === "kn") {
+    const match = /(?:\u0c95\u0cb3\u0cc6\u0ca6|\u0cb9\u0cbf\u0c82\u0ca6\u0cbf\u0ca8)\s*(\d+)\s*(\u0ca6\u0cbf\u0ca8|\u0ca6\u0cbf\u0ca8\u0c97\u0cb3\u0cbf\u0c82\u0ca6|\u0cb5\u0cbe\u0cb0|\u0cb5\u0cbe\u0cb0\u0c97\u0cb3\u0cbf\u0c82\u0ca6|\u0ca4\u0cbf\u0c82\u0c97\u0cb3\u0cc1|\u0ca4\u0cbf\u0c82\u0c97\u0cb3\u0cc1\u0c97\u0cb3\u0cbf\u0c82\u0ca6|\u0c97\u0c82\u0c9f\u0cc6|\u0c97\u0c82\u0c9f\u0cc6\u0c97\u0cb3\u0cbf\u0c82\u0ca6)/u.exec(value);
+    if (!match) return "Not clearly mentioned";
+    const [, number, unit] = match;
+    const unitMap = {
+      "\u0ca6\u0cbf\u0ca8": "days",
+      "\u0ca6\u0cbf\u0ca8\u0c97\u0cb3\u0cbf\u0c82\u0ca6": "days",
+      "\u0cb5\u0cbe\u0cb0": "weeks",
+      "\u0cb5\u0cbe\u0cb0\u0c97\u0cb3\u0cbf\u0c82\u0ca6": "weeks",
+      "\u0ca4\u0cbf\u0c82\u0c97\u0cb3\u0cc1": "months",
+      "\u0ca4\u0cbf\u0c82\u0c97\u0cb3\u0cc1\u0c97\u0cb3\u0cbf\u0c82\u0ca6": "months",
+      "\u0c97\u0c82\u0c9f\u0cc6": "hours",
+      "\u0c97\u0c82\u0c9f\u0cc6\u0c97\u0cb3\u0cbf\u0c82\u0ca6": "hours"
+    };
+    return `last ${number} ${unitMap[unit] || unit}`;
+  }
+
+  if (sourceLanguage === "hi") {
+    const match = /(?:\u092a\u093f\u091b\u0932\u0947|\u092a\u093f\u091b\u0932\u0940)\s*(\d+)\s*(\u0926\u093f\u0928|\u0926\u093f\u0928\u094b\u0902|\u0939\u095e\u094d\u0924\u0947|\u0939\u095e\u094d\u0924\u094b\u0902|\u092e\u0939\u0940\u0928\u0947|\u092e\u0939\u0940\u0928\u094b\u0902|\u0918\u0902\u091f\u0947|\u0918\u0902\u091f\u094b\u0902)/u.exec(value);
+    if (!match) return "Not clearly mentioned";
+    const [, number, unit] = match;
+    const unitMap = {
+      "\u0926\u093f\u0928": "days",
+      "\u0926\u093f\u0928\u094b\u0902": "days",
+      "\u0939\u095e\u094d\u0924\u0947": "weeks",
+      "\u0939\u095e\u094d\u0924\u094b\u0902": "weeks",
+      "\u092e\u0939\u0940\u0928\u0947": "months",
+      "\u092e\u0939\u0940\u0928\u094b\u0902": "months",
+      "\u0918\u0902\u091f\u0947": "hours",
+      "\u0918\u0902\u091f\u094b\u0902": "hours"
+    };
+    return `last ${number} ${unitMap[unit] || unit}`;
+  }
+
+  return "Not clearly mentioned";
+}
+
+function localizeDuration(duration, targetLanguage) {
+  if (!duration || duration === "Not clearly mentioned") {
+    return "Not clearly mentioned";
+  }
+
+  const match = /(?:last|past|for)\s+(\d+)\s+(day|days|week|weeks|month|months|hour|hours)/i.exec(duration);
+  if (!match) {
+    return duration;
+  }
+
+  const [, number, unit] = match;
+  if (targetLanguage === "kn") {
+    const unitMap = {
+      day: "\u0ca6\u0cbf\u0ca8\u0c97\u0cb3\u0cbf\u0c82\u0ca6",
+      days: "\u0ca6\u0cbf\u0ca8\u0c97\u0cb3\u0cbf\u0c82\u0ca6",
+      week: "\u0cb5\u0cbe\u0cb0\u0c97\u0cb3\u0cbf\u0c82\u0ca6",
+      weeks: "\u0cb5\u0cbe\u0cb0\u0c97\u0cb3\u0cbf\u0c82\u0ca6",
+      month: "\u0ca4\u0cbf\u0c82\u0c97\u0cb3\u0cc1\u0c97\u0cb3\u0cbf\u0c82\u0ca6",
+      months: "\u0ca4\u0cbf\u0c82\u0c97\u0cb3\u0cc1\u0c97\u0cb3\u0cbf\u0c82\u0ca6",
+      hour: "\u0c97\u0c82\u0c9f\u0cc6\u0c97\u0cb3\u0cbf\u0c82\u0ca6",
+      hours: "\u0c97\u0c82\u0c9f\u0cc6\u0c97\u0cb3\u0cbf\u0c82\u0ca6"
+    };
+    return `\u0c95\u0cb3\u0cc6\u0ca6 ${number} ${unitMap[unit.toLowerCase()] || unit}`;
+  }
+
+  if (targetLanguage === "hi") {
+    const unitMap = {
+      day: "\u0926\u093f\u0928\u094b\u0902 \u0938\u0947",
+      days: "\u0926\u093f\u0928\u094b\u0902 \u0938\u0947",
+      week: "\u0939\u095e\u094d\u0924\u094b\u0902 \u0938\u0947",
+      weeks: "\u0939\u095e\u094d\u0924\u094b\u0902 \u0938\u0947",
+      month: "\u092e\u0939\u0940\u0928\u094b\u0902 \u0938\u0947",
+      months: "\u092e\u0939\u0940\u0928\u094b\u0902 \u0938\u0947",
+      hour: "\u0918\u0902\u091f\u094b\u0902 \u0938\u0947",
+      hours: "\u0918\u0902\u091f\u094b\u0902 \u0938\u0947"
+    };
+    return `\u092a\u093f\u091b\u0932\u0947 ${number} ${unitMap[unit.toLowerCase()] || unit}`;
+  }
+
+  return duration;
+}
+
+function wordByWordTranslate(text, dictionary) {
+  let translated = text || "";
+  Object.entries(dictionary).forEach(([english, localized]) => {
+    translated = translated.replace(new RegExp(`\\b${english.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`, "gi"), localized);
+  });
+  return translated;
+}
+
+function translateToEnglishFallback(sourceText, sourceLanguage) {
+  const trimmed = (sourceText || "").trim();
+  if (!trimmed) return "";
+  if (sourceLanguage === "en") return trimmed;
+
+  const reverseDictionary = sourceLanguage === "kn" ? kannadaToEnglishTerms : sourceLanguage === "hi" ? hindiToEnglishTerms : null;
+  if (!reverseDictionary) return trimmed;
+
+  const matchedSymptoms = Object.entries(reverseDictionary)
+    .filter(([localized]) => trimmed.includes(localized))
+    .map(([, english]) => english)
+    .filter((term) => symptomTerms.includes(term));
+  const uniqueSymptoms = [...new Set(matchedSymptoms)];
+  const duration = extractLocalizedDuration(trimmed, sourceLanguage);
+
+  if (uniqueSymptoms.length) {
+    const symptomText = uniqueSymptoms.join(" and ");
+    return duration === "Not clearly mentioned"
+      ? `I am suffering from ${symptomText}.`
+      : `I am suffering from ${symptomText} from ${duration}.`;
+  }
+
+  let translated = trimmed;
+  Object.entries(reverseDictionary)
+    .sort((a, b) => b[0].length - a[0].length)
+    .forEach(([localized, english]) => {
+      translated = translated.replaceAll(localized, english);
+    });
+  return translated;
+}
+
+function buildLocalFallbackLocalizedText(sourceText, sourceLanguage, targetLanguage) {
+  const trimmedSourceText = (sourceText || "").trim();
+  if (!trimmedSourceText) return "";
+  if (targetLanguage === "en") {
+    return sourceLanguage === "en" ? trimmedSourceText : translateToEnglishFallback(trimmedSourceText, sourceLanguage);
+  }
+  if (targetLanguage === sourceLanguage) return trimmedSourceText;
+
+  const dictionary = targetLanguage === "kn" ? kannadaTerms : targetLanguage === "hi" ? hindiTerms : null;
+  if (!dictionary) return "";
+
+  const englishBase = sourceLanguage === "en" ? trimmedSourceText : translateToEnglishFallback(trimmedSourceText, sourceLanguage);
+  const symptoms = extractFallbackSymptoms(englishBase);
+  const duration = extractFallbackDuration(englishBase);
+  const translatedSymptoms = symptoms.map((symptom) => dictionary[symptom.toLowerCase()] || symptom);
+
+  if (translatedSymptoms.length) {
+    const symptomText = translatedSymptoms.join(targetLanguage === "kn" ? " \u0cae\u0ca4\u0ccd\u0ca4\u0cc1 " : " \u0914\u0930 ");
+    const localizedDuration = localizeDuration(duration, targetLanguage);
+    if (targetLanguage === "kn") {
+      return localizedDuration === "Not clearly mentioned"
+        ? `\u0ca8\u0cbe\u0ca8\u0cc1 ${symptomText}\u0ca6\u0cbf\u0c82\u0ca6 \u0cac\u0cb3\u0cb2\u0cc1\u0ca4\u0ccd\u0ca4\u0cbf\u0ca6\u0ccd\u0ca6\u0cc7\u0ca8\u0cc6.`
+        : `\u0ca8\u0cbe\u0ca8\u0cc1 ${localizedDuration} ${symptomText}\u0ca6\u0cbf\u0c82\u0ca6 \u0cac\u0cb3\u0cb2\u0cc1\u0ca4\u0ccd\u0ca4\u0cbf\u0ca6\u0ccd\u0ca6\u0cc7\u0ca8\u0cc6.`;
+    }
+    return localizedDuration === "Not clearly mentioned"
+      ? `\u092e\u0948\u0902 ${symptomText} \u0938\u0947 \u092a\u0940\u0921\u093c\u093f\u0924 \u0939\u0942\u0901\u0964`
+      : `\u092e\u0948\u0902 ${localizedDuration} ${symptomText} \u0938\u0947 \u092a\u0940\u0921\u093c\u093f\u0924 \u0939\u0942\u0901\u0964`;
+  }
+
+  return wordByWordTranslate(englishBase, dictionary);
+}
+
+function normalizeTranslationResult(result, sourceText, sourceLanguage, targetLanguage) {
+  const trimmedSourceText = (sourceText || "").trim();
+  const englishText = result?.englishText?.trim() || translateToEnglishFallback(trimmedSourceText, sourceLanguage) || trimmedSourceText;
+  const localizedText = targetLanguage === "en"
+    ? englishText
+    : result?.localizedText?.trim()
+      || buildLocalFallbackLocalizedText(englishText || trimmedSourceText, "en", targetLanguage)
+      || (targetLanguage === sourceLanguage ? trimmedSourceText : "");
+  const medicalTerms = Array.isArray(result?.medicalTerms) && result.medicalTerms.length
+    ? result.medicalTerms
+    : extractFallbackMedicalTerms(englishText || trimmedSourceText);
+  const symptoms = Array.isArray(result?.symptoms) && result.symptoms.length ? result.symptoms : medicalTerms;
+  const investigations = Array.isArray(result?.investigations) ? result.investigations : [];
+  const medications = Array.isArray(result?.medications) ? result.medications : [];
+  const duration = result?.duration?.trim() || (/(last\s+\d+\s+\w+|past\s+\d+\s+\w+|for\s+\d+\s+\w+)/i.exec(englishText)?.[0] || "Not clearly mentioned");
+  const severity = result?.severity?.trim() || "Not clearly mentioned";
+
+  return {
+    englishText,
+    localizedText,
+    medicalTerms,
+    symptoms,
+    investigations,
+    medications,
+    duration,
+    severity,
+    reportDraft: result?.reportDraft || ""
+  };
+}
+
+async function persistTranslationReport(result, onRefresh) {
+  await api.savePatientReportDraft({
+    englishText: result.englishText,
+    localizedText: result.localizedText,
+    symptoms: result.symptoms || [],
+    investigations: result.investigations || [],
+    medications: result.medications || [],
+    duration: result.duration || "Not clearly mentioned",
+    severity: result.severity || "Not clearly mentioned",
+    medicalTerms: result.medicalTerms || []
+  });
+  await onRefresh();
+}
+
+function RecorderOverlay({ visible, transcript, requestingPermission, error, onStop, targetLanguage }) {
+  if (!visible && !requestingPermission && !error) return null;
+
+  return (
+    <div className="recorder-overlay recorder-overlay-advanced">
+      <div className="recorder-shell">
+        <div className="recorder-visual-stage">
+          <div className="recorder-rings"><span /><span /><span /></div>
+          <div className={`recorder-core ${error ? "recorder-core-error" : ""}`}>{error ? "!" : "REC"}</div>
+        </div>
+        <div className="recorder-body">
+          <p className="overline">Patient Voice Capture</p>
+          <h3>{requestingPermission ? "Allow microphone access" : error ? "Microphone issue" : "Listening to live speech"}</h3>
+          <p>{error || transcript || `Speak naturally. MedVoice-AI will convert your speech and prepare a ${targetLanguage.toUpperCase()} response view automatically.`}</p>
+          <div className="recorder-status-grid">
+            <div className="recorder-status-card"><span>Status</span><strong>{requestingPermission ? "Permission" : error ? "Attention" : "Active"}</strong></div>
+            <div className="recorder-status-card"><span>Output</span><strong>{targetLanguage.toUpperCase()}</strong></div>
+            <div className="recorder-status-card"><span>Mode</span><strong>Realtime</strong></div>
+          </div>
+          <div className="recorder-transcript-box"><p className="feature-eyebrow">Live transcript</p><div>{transcript || "Waiting for speech signal..."}</div></div>
+          <button className="primary-btn" onClick={onStop}>{error ? "Close" : "Stop recording"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="dashboard-footer cinematic-footer">
+      <div><h4>MedVoice-AI</h4><p>Patient-side translation, multilingual support, and report continuity designed for everyday care conversations.</p></div>
+      <div><p>Regional speech capture</p><p>Structured health reports</p><p>Personal care profile</p></div>
+    </footer>
+  );
+}
+
+function SignalCard({ eyebrow, value, label, tone }) {
+  return (
+    <article className={`patient-signal-card ${tone}`}>
+      <p className="patient-signal-eyebrow">{eyebrow}</p>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </article>
+  );
+}
+
+function formatDoctorName(report) {
+  if (!report || report.status === "Default report") return "Not assigned yet";
+  return "Dr. Care Team";
+}
+
+function formatDisplayDate(value) {
+  if (!value) return "Not added";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short", year: "numeric" }).format(date);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildDefaultReport(user) {
+  return {
+    id: "default-report",
+    patientId: user.id,
+    patientName: user.name || "Not added",
+    patientAge: user.age || null,
+    patientEmail: user.email || "Not added",
+    patientLanguage: user.preferredLanguage || "",
+    symptoms: ["No consultation report yet"],
+    duration: "Waiting for first conversation-based report",
+    diagnosis: ["No diagnosis added yet"],
+    prescription: ["No prescription added yet"],
+    medicalTerms: ["No medical terms extracted yet"],
+    doctorNotes: "This default report is shown until the first real report is created from the conversation workflow.",
+    phoneNumber: user.phoneNumber || "Not added",
+    address: user.address || "Not added",
+    gender: user.gender || "Not added",
+    bloodGroup: user.bloodGroup || "Not added",
+    dob: user.dob || "",
+    createdAt: user.dob || new Date().toISOString(),
+    status: "Default report"
+  };
+}
+
+function downloadReport(report, user) {
+  const safePatientName = (report.patientName || user.name || "patient").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "patient";
+  const reportDate = formatDisplayDate(report.createdAt);
+  const sections = [
+    ["Patient ID", `PT-${String(report.patientId || user.id || "").slice(0, 6).toUpperCase()}`],
+    ["Patient Name", report.patientName || user.name || "Not added"],
+    ["Age", report.patientAge || user.age || "Not added"],
+    ["Gender", report.gender || user.gender || "Not added"],
+    ["Blood Group", report.bloodGroup || user.bloodGroup || "Not added"],
+    ["Contact Number", report.phoneNumber || user.phoneNumber || "Not added"],
+    ["Address", report.address || user.address || "Not added"],
+    ["Email", report.patientEmail || user.email || "Not added"],
+    ["Language", report.patientLanguage?.toUpperCase() || user.preferredLanguage?.toUpperCase() || "Not added"],
+    ["Report Date", reportDate],
+    ["Symptoms", (report.symptoms || []).join(", ") || "Not mentioned"],
+    ["Duration", report.duration || "Not mentioned"],
+    ["Diagnosis", (report.diagnosis || []).join("<br />") || "Pending"],
+    ["Prescription", (report.prescription || []).join("<br />") || "Pending"]
+  ];
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Patient Report</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #f2f5fb; color: #10203d; }
+    main { max-width: 900px; margin: 32px auto; background: #ffffff; border-radius: 20px; padding: 32px; box-shadow: 0 12px 40px rgba(16, 32, 61, 0.12); }
+    h1 { margin: 0 0 8px; color: #1f4fbf; }
+    p { margin: 0 0 20px; color: #56657f; }
+    .grid { display: grid; grid-template-columns: 220px 1fr; border-top: 1px solid #d9e1f2; }
+    .label, .value { padding: 12px 0; border-bottom: 1px solid #d9e1f2; }
+    .label { font-weight: 700; color: #163b86; padding-right: 20px; }
+    .value { line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Patient Report</h1>
+    <p>Doctor-reviewed report generated from the clinical conversation.</p>
+    <section class="grid">
+      ${sections.map(([label, value]) => `<div class="label">${escapeHtml(label)}</div><div class="value">${String(value).split("<br />").map(escapeHtml).join("<br />")}</div>`).join("")}
+    </section>
+  </main>
+</body>
+</html>`;
+
+  const blob = new Blob([html], { type: "text/html" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${safePatientName}-report.html`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function ReportDocument({ report, user, onDownload, onDelete }) {
+  const phoneNumber = report.phoneNumber || user.phoneNumber || "9876543210";
+  const address = report.address || user.address || "123, Green Park, New Delhi - 110016";
+  const gender = report.gender || user.gender || "Male";
+  const bloodGroup = report.bloodGroup || user.bloodGroup || "O+";
+
+  return (
+    <article className="patient-report-document">
+      <div className="report-doc-header">
+        <h2>PATIENT REPORT</h2>
+        <div className="report-doc-actions">
+          <button className="secondary-btn" onClick={onDownload}>Download report</button>
+          {report.id !== "default-report" ? (
+            <button
+              className="secondary-btn patient-report-delete-btn"
+              onClick={() => onDelete(report)}
+            >
+              Delete report
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <section>
+        <h3>1. Patient Information</h3>
+        <div className="report-info-grid">
+          <p><span>Patient ID</span><strong>PT-{String(report.patientId).slice(0, 6).toUpperCase()}</strong></p>
+          <p><span>Patient Name</span><strong>{report.patientName}</strong></p>
+          <p><span>Age</span><strong>{report.patientAge || "Not added"}</strong></p>
+          <p><span>Gender</span><strong>{gender}</strong></p>
+          <p><span>Blood Group</span><strong>{bloodGroup}</strong></p>
+          <p><span>Contact Number</span><strong>{phoneNumber}</strong></p>
+          <p><span>Address</span><strong>{address}</strong></p>
+          <p><span>Email</span><strong>{report.patientEmail}</strong></p>
+          <p><span>Language</span><strong>{report.patientLanguage?.toUpperCase()}</strong></p>
+        </div>
+      </section>
+
+      <section>
+        <h3>2. Symptoms</h3>
+        <ul>{(report.symptoms || []).map((item) => <li key={item}>{item}</li>)}</ul>
+      </section>
+
+      <section>
+        <h3>3. Duration</h3>
+        <p>{report.duration || "Not clearly mentioned"}</p>
+      </section>
+
+      <section>
+        <h3>4. Diagnosis</h3>
+        <ul>{(report.diagnosis || []).map((item) => <li key={item}>{item}</li>)}</ul>
+      </section>
+
+      <section>
+        <h3>5. Prescription</h3>
+        <ul>{(report.prescription || []).map((item) => <li key={item}>{item}</li>)}</ul>
+      </section>
+    </article>
+  );
+}
+
+export default function PatientDashboard({ user, reports, dashboard, languages, onRefresh, onLogout, initialPage = "Home", onNavigate = () => {} }) {
+  const [active, setActiveState] = useState(initialPage);
+  const [textInput, setTextInput] = useState("");
+  const [sourceLanguage, setSourceLanguage] = useState(user.preferredLanguage || "kn");
+  const [targetLanguage, setTargetLanguage] = useState("hi");
+  const [translationResult, setTranslationResult] = useState(null);
+  const [translationError, setTranslationError] = useState("");
+  const [selectedAudio, setSelectedAudio] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const speech = useRealtimeSpeech();
+  const silenceTimerRef = useRef(null);
+  const lastAutoTranslatedTranscriptRef = useRef("");
+
+  const visibleReports = useMemo(() => reports, [reports]);
+  const defaultReport = useMemo(() => buildDefaultReport(user), [user]);
+  const hasRealReports = visibleReports.length > 0;
+  const reportListForView = hasRealReports ? visibleReports : [defaultReport];
+  const latestReport = reportListForView[0];
+  const transcriptWords = speech.transcript ? speech.transcript.split(/\s+/).filter(Boolean).length : 0;
+  const displayedReportCount = reportListForView.length;
+  const [selectedReportId, setSelectedReportId] = useState("");
+  const typedSourceText = textInput.trim();
+  const spokenSourceText = (speech.transcript || "").trim();
+  const liveSourceText = (typedSourceText || spokenSourceText || "").trim();
+  const fallbackEnglishText = translateToEnglishFallback(liveSourceText, sourceLanguage) || liveSourceText;
+  const displayEnglishText = translationResult?.englishText || fallbackEnglishText;
+  const displayLocalizedText =
+    translationResult?.localizedText
+    || buildLocalFallbackLocalizedText(liveSourceText || displayEnglishText, sourceLanguage, targetLanguage)
+    || (targetLanguage === "en" ? displayEnglishText : targetLanguage === sourceLanguage ? liveSourceText : "");
+  const displayMedicalTerms = translationResult?.medicalTerms?.length
+    ? translationResult.medicalTerms
+    : extractFallbackMedicalTerms(displayEnglishText || liveSourceText);
+  const displayClinicalSummary = [
+    ...(translationResult?.symptoms || []),
+    ...((translationResult?.investigations || []).map((item) => `Test: ${item}`)),
+    ...((translationResult?.medications || []).map((item) => `Medicine: ${item}`)),
+    translationResult?.duration ? `Duration: ${translationResult.duration}` : "",
+    ...displayMedicalTerms
+  ].filter(Boolean);
+  const baseReportCards = hasRealReports ? visibleReports : [];
+  const reportCards = hasRealReports ? baseReportCards : [defaultReport];
+  const latestDoctorReviewedReport = baseReportCards.find((report) => report.status === "Doctor reviewed");
+  const latestActivityReport = latestDoctorReviewedReport || reportCards[0] || defaultReport;
+  const latestVisitDate = formatDisplayDate(latestActivityReport?.createdAt || user.dob);
+  const latestDoctorName = formatDoctorName(latestActivityReport);
+
+  useEffect(() => {
+    setActiveState(initialPage);
+  }, [initialPage]);
+
+  const setActive = (page, path = patientPathMap[page]) => {
+    setActiveState(page);
+    if (path) {
+      onNavigate(path);
+    }
+  };
+
+  useEffect(() => {
+    if (!window.speechSynthesis) {
+      return undefined;
+    }
+
+    loadSpeechVoices();
+    return undefined;
+  }, []);
+
+  useEffect(() => {
+    setSelectedReportId((current) => {
+      if (current && reportCards.some((report) => report.id === current)) {
+        return current;
+      }
+      return "";
+    });
+  }, [reportCards]);
+
+  useEffect(() => {
+    if (active === "Reports") {
+      onRefresh();
+      const intervalId = setInterval(() => {
+        onRefresh();
+      }, 15000);
+      return () => clearInterval(intervalId);
+    }
+    return undefined;
+  }, [active, onRefresh]);
+
+  const selectedReport = reportCards.find((report) => report.id === selectedReportId) || null;
+
+  const handleDeleteReport = async (report) => {
+    if (!report || report.id === "default-report") {
+      return;
+    }
+
+    await api.deleteReport(report.id);
+    if (report.status === "Pending doctor review") {
+      setTranslationResult(null);
+    }
+    setSelectedReportId("");
+    await onRefresh();
+  };
+
+  useEffect(() => {
+    speech.setLanguage(speechLocales[sourceLanguage] || "en-US");
+  }, [sourceLanguage]);
+
+  useEffect(() => {
+    if (!speech.listening || !speech.transcript.trim()) {
+      clearTimeout(silenceTimerRef.current);
+      return undefined;
+    }
+
+    clearTimeout(silenceTimerRef.current);
+    silenceTimerRef.current = setTimeout(async () => {
+      const trimmedTranscript = speech.transcript.trim();
+      if (!trimmedTranscript || trimmedTranscript === lastAutoTranslatedTranscriptRef.current) {
+        return;
+      }
+
+      setLoading(true);
+      try {
+        setTranslationError("");
+        const result = await api.translatePatientInput({ text: trimmedTranscript, sourceLanguage, targetLanguage });
+        lastAutoTranslatedTranscriptRef.current = trimmedTranscript;
+        const normalized = normalizeTranslationResult(result, trimmedTranscript, sourceLanguage, targetLanguage);
+        setTranslationResult(normalized);
+        await persistTranslationReport(normalized, onRefresh);
+      } catch {
+        const fallback = normalizeTranslationResult({}, trimmedTranscript, sourceLanguage, targetLanguage);
+        setTranslationError(fallback.localizedText ? "" : "Translation service is offline. Start the AI translation service to get the selected regional-language output.");
+        lastAutoTranslatedTranscriptRef.current = trimmedTranscript;
+        setTranslationResult(fallback);
+        await persistTranslationReport(fallback, onRefresh);
+      } finally {
+        setLoading(false);
+      }
+    }, 7000);
+
+    return () => clearTimeout(silenceTimerRef.current);
+  }, [speech.transcript, speech.listening, sourceLanguage, targetLanguage]);
+
+  useEffect(() => () => clearTimeout(silenceTimerRef.current), []);
+
+  const speakRegionalOutput = async (result) => {
+    const regionalText = (result?.localizedText || "").trim();
+    if (!regionalText) {
+      return;
+    }
+    await speakTranslatedText(regionalText, targetLanguage);
+  };
+
+  const handleTextTranslate = async () => {
+    const sourceText = (textInput.trim() || speech.transcript || "").trim();
+    setLoading(true);
+    try {
+      setTranslationError("");
+      if (!sourceText) {
+        setTranslationResult({ englishText: "", localizedText: "", medicalTerms: [] });
+        return;
+      }
+      const result = await api.translatePatientInput({ text: sourceText, sourceLanguage, targetLanguage });
+      const normalized = normalizeTranslationResult(result, sourceText, sourceLanguage, targetLanguage);
+      setTranslationResult(normalized);
+      await speakRegionalOutput(normalized);
+      await persistTranslationReport(normalized, onRefresh);
+    } catch {
+      const fallback = normalizeTranslationResult({}, sourceText, sourceLanguage, targetLanguage);
+      setTranslationError(fallback.localizedText ? "" : "Translation service is offline. Start the AI translation service to get the selected regional-language output.");
+      setTranslationResult(fallback);
+      await speakRegionalOutput(fallback);
+      await persistTranslationReport(fallback, onRefresh);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAudioTranslate = async () => {
+    if (!selectedAudio) return;
+    setLoading(true);
+    try {
+      setTranslationError("");
+      const result = await api.translatePatientAudio({ audio: selectedAudio, sourceLanguage, targetLanguage });
+      const normalized = normalizeTranslationResult(result, selectedAudio?.name || "", sourceLanguage, targetLanguage);
+      setTranslationResult(normalized);
+      await persistTranslationReport(normalized, onRefresh);
+    } catch {
+      const fallback = normalizeTranslationResult({}, selectedAudio?.name || "", sourceLanguage, targetLanguage);
+      setTranslationError(fallback.localizedText ? "" : "Translation service is offline. Start the AI translation service to get the selected regional-language output.");
+      setTranslationResult(fallback);
+      await persistTranslationReport(fallback, onRefresh);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="page-shell cinematic-shell">
+      <RecorderOverlay visible={speech.listening} transcript={speech.transcript} requestingPermission={speech.requestingPermission} error={speech.error} targetLanguage={targetLanguage} onStop={() => { speech.stop(); speech.setError(""); }} />
+      <Navbar items={["Home", "Translation", "Reports", "About"]} active={active} setActive={setActive} pathMap={patientPathMap} onLogout={onLogout} role="PATIENT" userName={user.name} />
+
+      {active === "Home" ? (
+        <>
+          <section className="patient-home-grid">
+            <article className="panel patient-home-welcome">
+              <p className="overline">Welcome</p>
+              <h1>Welcome, {user.name}</h1>
+              <p>Your health summary at a glance.</p>
+              <div className="patient-home-meta">
+                <div><span>Last Visit</span><strong>{latestVisitDate}</strong></div>
+                <div><span>Doctor</span><strong>{latestDoctorName}</strong></div>
+              </div>
+            </article>
+
+            <article className="panel patient-home-language">
+              <p className="feature-eyebrow">Language Info</p>
+              <h3>Current language: {sourceLanguage.toUpperCase()}</h3>
+              <p>Change your conversation language for translation and report generation.</p>
+              <label>
+                <span>Change Language</span>
+                <select value={sourceLanguage} onChange={(e) => setSourceLanguage(e.target.value)}>
+                  {languages.map((language) => <option key={language.code} value={language.code}>{language.label}</option>)}
+                </select>
+              </label>
+            </article>
+          </section>
+
+          <section className="patient-home-lower">
+            <article className="panel patient-home-history">
+              <div className="panel-topline">
+                <p className="feature-eyebrow">Recent Activity</p>
+                <span>{hasRealReports ? "Updated" : "Waiting"}</span>
+              </div>
+              <div className="meaning-stack">
+                <div className="meaning-card">
+                  <span>Recent conversation</span>
+                  <strong>{latestDoctorName} - {latestVisitDate}</strong>
+                </div>
+                <div className="meaning-card">
+                  <span>Last translated session</span>
+                  <strong>{sourceLanguage.toUpperCase()} to {targetLanguage.toUpperCase()}</strong>
+                </div>
+                <div className="meaning-card">
+                  <span>Latest report generated</span>
+                  <strong>{latestActivityReport?.status || "No report generated yet"}</strong>
+                </div>
+              </div>
+            </article>
+
+            <article className="panel patient-home-summary">
+              <div className="panel-topline">
+                <p className="feature-eyebrow">Latest Medical Summary</p>
+                <span>{translationResult?.duration || latestActivityReport?.duration || "Pending"}</span>
+              </div>
+              <div className="meaning-stack">
+                <div className="meaning-card">
+                  <span>Symptoms</span>
+                  <strong>{(translationResult?.symptoms || latestActivityReport?.symptoms || []).join(", ") || "No symptoms captured yet"}</strong>
+                </div>
+                <div className="meaning-card">
+                  <span>Prescription</span>
+                  <strong>{latestActivityReport?.prescription?.join(", ") || "No prescription added yet"}</strong>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section className="patient-home-about">
+            <article className="panel patient-home-about-card">
+              <p className="feature-eyebrow">About MedVoice AI</p>
+              <h3>Breaking language barriers in healthcare</h3>
+              <p>
+                MedVoice AI helps patients speak comfortably in their own language during healthcare conversations.
+                It connects translation, reports, and follow-up care details in one patient dashboard.
+                This makes medical communication clearer, faster, and easier to continue across visits.
+              </p>
+            </article>
+          </section>
+        </>
+      ) : null}
+
+      {active === "Translation" ? (
+        <section className="patient-translation-page">
+          <section className="translation-image-layout">
+            <div className="translation-image-left">
+              <div className="translation-image-toprow">
+                <label className="translation-image-langbox">
+                  <span>From</span>
+                  <select value={sourceLanguage} onChange={(e) => setSourceLanguage(e.target.value)}>
+                    {languages.map((language) => <option key={language.code} value={language.code}>{language.label}</option>)}
+                  </select>
+                </label>
+                <label className="translation-image-langbox">
+                  <span>To</span>
+                  <select value={targetLanguage} onChange={(e) => setTargetLanguage(e.target.value)}>
+                    {languages.map((language) => <option key={language.code} value={language.code}>{language.label}</option>)}
+                  </select>
+                </label>
+              </div>
+
+              <article className="panel translation-input-stage translation-image-micpanel">
+                <div className="panel-topline">
+                  <p className="feature-eyebrow">Voice & Text Input</p>
+                  <span>{speech.listening ? "Listening" : "Standby"}</span>
+                </div>
+
+                <div className="translation-mic-showcase translation-image-micshowcase">
+                  <div className={`studio-mic-ring ${speech.listening ? "is-live" : ""}`}>
+                    <button
+                      className={`studio-mic-button ${speech.listening ? "is-live" : ""}`}
+                      onClick={speech.start}
+                      disabled={speech.requestingPermission}
+                    >
+                      {speech.requestingPermission ? "..." : "MIC"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="translation-image-inputrow">
+                  <input value={textInput} onChange={(e) => setTextInput(e.target.value)} placeholder="Type your health concern" />
+                  <button className="primary-btn studio-send-btn translation-image-translatebtn" onClick={handleTextTranslate} disabled={loading}>Translate</button>
+                </div>
+
+                <div className="translation-image-actionrow">
+                  <button className="secondary-btn" onClick={speech.stop}>Stop microphone</button>
+                  <label className="secondary-btn translation-image-filebutton">
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      onChange={(event) => setSelectedAudio(event.target.files?.[0] || null)}
+                    />
+                    Select audio
+                  </label>
+                  {selectedAudio ? (
+                    <button className="secondary-btn" onClick={handleAudioTranslate} disabled={loading}>Translate audio</button>
+                  ) : null}
+                </div>
+                {translationError ? <p className="error-text">{translationError}</p> : null}
+              </article>
+            </div>
+
+            <div className="translation-image-right">
+              <article className="panel translation-image-outputcard">
+                <h3>Converted text in english</h3>
+                <textarea
+                  rows="7"
+                  readOnly
+                  value={displayEnglishText}
+                  placeholder="Converted English text will appear here."
+                />
+              </article>
+
+              <article className="panel translation-image-outputcard">
+                <h3>Converted text in regional language</h3>
+                <textarea
+                  rows="7"
+                  readOnly
+                  value={displayLocalizedText}
+                  placeholder="Converted regional language text will appear here."
+                />
+              </article>
+
+              <article className="panel translation-image-outputcard">
+                <h3>Extracted medical terms</h3>
+                <textarea
+                  rows="7"
+                  readOnly
+                  value={displayClinicalSummary.join(", ")}
+                  placeholder="Symptoms, duration, and medical terms will appear here."
+                />
+              </article>
+            </div>
+          </section>
+        </section>
+      ) : null}
+
+      {active === "Reports" ? (
+        <section className="panel patient-report-page">
+          {selectedReport ? (
+            <div className="patient-report-detail">
+              <div className="patient-report-detail-actions">
+                <button type="button" className="secondary-btn" onClick={() => setSelectedReportId("")}>Back to report cards</button>
+              </div>
+              <ReportDocument report={selectedReport} user={user} onDownload={() => downloadReport(selectedReport, user)} onDelete={handleDeleteReport} />
+            </div>
+          ) : (
+            <>
+              <div className="patient-report-card-grid">
+                {reportCards.map((report, index) => (
+                  <button
+                    key={report.id}
+                    type="button"
+                    className="patient-report-card"
+                    onClick={() => setSelectedReportId(report.id)}
+                  >
+                    <div className="patient-report-card-head">
+                      <h3>{report.patientName || user.name}</h3>
+                      <div className="patient-report-card-actions">
+                        <span>{report.status === "Pending doctor review" ? "Pending Report" : hasRealReports ? `Report ${index + 1}` : "Default Report"}</span>
+                        <button
+                          type="button"
+                          className="patient-report-download-btn"
+                          aria-label="Download report"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            downloadReport(report, user);
+                          }}
+                        >
+                          Download
+                        </button>
+                        {report.id !== "default-report" ? (
+                          <button
+                            type="button"
+                            className="patient-report-delete-btn"
+                            aria-label="Delete report"
+                            onClick={async (event) => {
+                              event.stopPropagation();
+                              await handleDeleteReport(report);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                    <p><strong>Name:</strong> {report.patientName || user.name}</p>
+                    <p><strong>DOB:</strong> {formatDisplayDate(report.dob || user.dob)}</p>
+                    <p><strong>Symptoms:</strong> {report.symptoms?.join(", ") || "No symptoms captured yet"}</p>
+                    <p><strong>Duration:</strong> {report.duration || "Not clearly mentioned"}</p>
+                    <p><strong>Prescription:</strong> {report.prescription?.join(", ") || "No prescription added yet"}</p>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </section>
+      ) : null}
+
+      {active === "About" ? (
+        <section className="patient-about-page">
+          <article className="panel about-page-hero patient-about-hero">
+            <div>
+              <p className="overline">About Patient</p>
+              <h2>{user.name}</h2>
+            </div>
+            <div className="translation-top-actions patient-about-top-actions">
+              <div className="meaning-card">
+                <span>Date of Birth</span>
+                <strong>{formatDisplayDate(user.dob)}{user.age ? ` (${user.age} Years)` : ""}</strong>
+              </div>
+            </div>
+          </article>
+
+          <section className="about-feature-grid patient-about-feature-grid">
+            <article className="about-feature-card">
+              <span>Age</span>
+              <strong>{user.age || "Not added"}</strong>
+            </article>
+            <article className="about-feature-card">
+              <span>Phone Number</span>
+              <strong>{user.phoneNumber || "Not added"}</strong>
+            </article>
+            <article className="about-feature-card">
+              <span>Email</span>
+              <strong>{user.email}</strong>
+            </article>
+            <article className="about-feature-card">
+              <span>Gender</span>
+              <strong>{user.gender || "Not added"}</strong>
+            </article>
+            <article className="about-feature-card">
+              <span>Blood Group</span>
+              <strong>{user.bloodGroup || "Not added"}</strong>
+            </article>
+            <article className="about-feature-card">
+              <span>Language</span>
+              <strong>{user.preferredLanguage?.toUpperCase() || "Not added"}</strong>
+            </article>
+            <article className="about-feature-card">
+              <span>Address</span>
+              <strong>{user.address || "Not added"}</strong>
+            </article>
+          </section>
+        </section>
+      ) : null}
+    </div>
+  );
+}
