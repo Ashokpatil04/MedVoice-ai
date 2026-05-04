@@ -1,0 +1,352 @@
+import io
+import json
+import os
+import re
+from typing import Any
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, UploadFile
+from pydantic import BaseModel
+
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover
+    OpenAI = None
+
+load_dotenv()
+app = FastAPI(title="AI Healthcare Major Project")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if OpenAI and os.getenv("OPENAI_API_KEY") else None
+
+
+class PatientTextRequest(BaseModel):
+    text: str
+    sourceLanguage: str
+    targetLanguage: str
+
+
+class DoctorLiveTextRequest(BaseModel):
+    text: str
+    sourceLanguage: str
+
+
+COMMON_MEDICAL_TERMS = [
+    "fever", "cough", "headache", "body pain", "fatigue", "vomiting", "infection",
+    "pressure", "cold", "dizziness", "nausea", "sore throat", "dehydration", "chest pain",
+    "cbc", "cdc", "widal", "blood test", "paracetamol", "dolo", "dolo 650", "tablet"
+]
+
+SYMPTOM_TERMS = [
+    "fever", "cough", "headache", "body pain", "fatigue", "vomiting", "infection",
+    "pressure", "cold", "dizziness", "nausea", "sore throat", "dehydration", "chest pain"
+]
+
+INVESTIGATION_TERMS = [
+    "cbc", "cdc", "widal", "blood test", "scan", "x-ray", "mri", "ct scan", "urine test"
+]
+
+MEDICATION_TERMS = [
+    "paracetamol", "dolo", "dolo 650", "tablet", "capsule", "syrup", "antibiotic"
+]
+
+LANGUAGE_NAMES = {
+    "en": "English",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "en-us": "English",
+    "hi-in": "Hindi",
+    "kn-in": "Kannada"
+}
+
+SEVERITY_TERMS = {
+    "severe": "Severe",
+    "high": "High",
+    "mild": "Mild",
+    "moderate": "Moderate"
+}
+
+DURATION_PATTERNS = [
+    r"\b(last|past)\s+\d+\s+(day|days|week|weeks|month|months|hour|hours)\b",
+    r"\b\d+\s+(day|days|week|weeks|month|months|hour|hours)\b",
+    r"\bsince\s+\w+\b",
+    r"\bfor\s+\d+\s+(day|days|week|weeks|month|months|hour|hours)\b"
+]
+
+
+def extract_biobert_medical_terms(text: str) -> list[str]:
+    lowered = text.lower()
+    found = [word for word in COMMON_MEDICAL_TERMS if word in lowered]
+    return found or ["general observation"]
+
+
+def extract_symptoms(text: str) -> list[str]:
+    lowered = text.lower()
+    symptoms = [term.title() for term in SYMPTOM_TERMS if term in lowered]
+    return symptoms or ["General discomfort"]
+
+
+def extract_investigations(text: str) -> list[str]:
+    lowered = text.lower()
+    investigations = [term.upper() if term in {"cbc", "cdc", "mri"} else term.title() for term in INVESTIGATION_TERMS if term in lowered]
+    return investigations
+
+
+def extract_medications(text: str) -> list[str]:
+    lowered = text.lower()
+    medications = [term.title() if term != "dolo 650" else "Dolo 650" for term in MEDICATION_TERMS if term in lowered]
+    deduped: list[str] = []
+    for item in medications:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def extract_duration(text: str) -> str:
+    for pattern in DURATION_PATTERNS:
+        match = re.search(pattern, text.lower())
+        if match:
+            return match.group(0)
+    return "Not clearly mentioned"
+
+
+def extract_severity(text: str) -> str:
+    lowered = text.lower()
+    for key, value in SEVERITY_TERMS.items():
+        if key in lowered:
+            return value
+    return "Not clearly mentioned"
+
+
+def whisper_like_transcribe(audio_bytes: bytes) -> str:
+    if not client:
+        return "Simulated Whisper transcript from uploaded audio for real-time healthcare conversion."
+
+    result = client.audio.transcriptions.create(
+        model=os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1"),
+        file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav")
+    )
+    return result.text
+
+
+def normalize_language_name(language: str) -> str:
+    key = (language or "").strip().lower()
+    return LANGUAGE_NAMES.get(key, language or "English")
+
+
+def parse_json_object(raw_text: str) -> dict[str, Any] | None:
+    if not raw_text:
+        return None
+
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+    if not match:
+        return None
+
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def normalize_compare_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def translate_text(text: str, source_language: str, target_language: str) -> str:
+    source_name = normalize_language_name(source_language)
+    target_name = normalize_language_name(target_language)
+    if source_name.lower() == target_name.lower():
+        return text
+
+    if not client:
+        return f"[{source_name} to {target_name}] {text}"
+
+    prompt = (
+        f"Translate this healthcare conversation from {source_name} to {target_name}. "
+        "Keep the wording clear, natural, and medically accurate. Return only the translation.\n\n"
+        f"Text: {text}"
+    )
+    response = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"), input=prompt)
+    translated = response.output_text.strip()
+    if normalize_compare_text(translated) != normalize_compare_text(text):
+        return translated
+
+    retry_prompt = (
+        f"Translate this healthcare statement into natural {target_name}. "
+        f"Do not repeat the original {source_name} text. Return only the final {target_name} translation.\n\n"
+        f"Text: {text}"
+    )
+    retry_response = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"), input=retry_prompt)
+    return retry_response.output_text.strip()
+
+
+def englishify(text: str, source_language: str) -> str:
+    if normalize_language_name(source_language).lower() == "english":
+        return text
+    return translate_text(text, source_language, "English")
+
+
+def build_localized_text(source_text: str, english_text: str, source_language: str, target_language: str) -> str:
+    source_name = normalize_language_name(source_language)
+    target_name = normalize_language_name(target_language)
+
+    if target_name.lower() == "english":
+        return english_text
+
+    if source_name.lower() == target_name.lower():
+        return source_text
+
+    localized_text = translate_text(english_text, "English", target_language)
+    if localized_text and localized_text.strip():
+        return localized_text.strip()
+
+    direct_translation = translate_text(source_text, source_language, target_language)
+    if direct_translation and direct_translation.strip():
+        return direct_translation.strip()
+
+    return english_text
+
+
+def llm_structured_medical_data(english_transcript: str) -> dict[str, Any] | None:
+    if not client:
+        return None
+
+    prompt = (
+        "You are extracting structured medical information from a patient healthcare statement.\n"
+        "Return strict JSON with keys: symptoms (array of strings), investigations (array of strings), medications (array of strings), duration (string), severity (string), medicalTerms (array of strings).\n"
+        "Put patient complaints like fever/cough in symptoms. Put tests like CBC, Widal, blood test in investigations. Put medicines like paracetamol, Dolo 650 in medications. If duration or severity is unclear, use 'Not clearly mentioned'.\n\n"
+        f"Patient statement: {english_transcript}"
+    )
+    response = client.responses.create(model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"), input=prompt)
+    raw_text = response.output_text.strip()
+    parsed = parse_json_object(raw_text)
+    if not parsed:
+        return None
+
+    return {
+        "symptoms": parsed.get("symptoms") or ["General discomfort"],
+        "investigations": parsed.get("investigations") or [],
+        "medications": parsed.get("medications") or [],
+        "duration": parsed.get("duration") or "Not clearly mentioned",
+        "severity": parsed.get("severity") or "Not clearly mentioned",
+        "medicalTerms": parsed.get("medicalTerms") or ["general observation"]
+    }
+
+
+def structured_medical_data(english_transcript: str) -> dict[str, Any]:
+    llm_result = llm_structured_medical_data(english_transcript)
+    if llm_result:
+        return llm_result
+
+    symptoms = extract_symptoms(english_transcript)
+    investigations = extract_investigations(english_transcript)
+    medications = extract_medications(english_transcript)
+    duration = extract_duration(english_transcript)
+    severity = extract_severity(english_transcript)
+    medical_terms = extract_biobert_medical_terms(english_transcript)
+    return {
+        "symptoms": symptoms,
+        "investigations": investigations,
+        "medications": medications,
+        "duration": duration,
+        "severity": severity,
+        "medicalTerms": medical_terms,
+    }
+
+
+def build_patient_report_payload(english_text: str, localized_text: str, structured: dict[str, Any]) -> str:
+    report = {
+        "chiefComplaintEnglish": english_text,
+        "localizedComplaint": localized_text,
+        "symptoms": structured["symptoms"],
+        "investigations": structured["investigations"],
+        "medications": structured["medications"],
+        "duration": structured["duration"],
+        "severity": structured["severity"],
+        "medicalTerms": structured["medicalTerms"],
+        "status": "Pending doctor review"
+    }
+    return json.dumps(report)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/ai/patient/translate")
+def patient_translate(payload: PatientTextRequest) -> dict[str, Any]:
+    english_text = englishify(payload.text, payload.sourceLanguage)
+    localized_text = build_localized_text(payload.text, english_text, payload.sourceLanguage, payload.targetLanguage)
+    structured = structured_medical_data(english_text)
+    return {
+        "englishText": english_text,
+        "localizedText": localized_text,
+        "medicalTerms": structured["medicalTerms"],
+        "symptoms": structured["symptoms"],
+        "investigations": structured["investigations"],
+        "medications": structured["medications"],
+        "duration": structured["duration"],
+        "severity": structured["severity"],
+        "reportDraft": build_patient_report_payload(english_text, localized_text, structured)
+    }
+
+
+@app.post("/ai/patient/translate-audio")
+async def patient_translate_audio(
+    audio: UploadFile = File(...),
+    sourceLanguage: str = Form(...),
+    targetLanguage: str = Form(...)
+) -> dict[str, Any]:
+    audio_bytes = await audio.read()
+    transcript = whisper_like_transcribe(audio_bytes)
+    english_text = englishify(transcript, sourceLanguage)
+    localized_text = build_localized_text(transcript, english_text, sourceLanguage, targetLanguage)
+    structured = structured_medical_data(english_text)
+    return {
+        "englishText": english_text,
+        "localizedText": localized_text,
+        "medicalTerms": structured["medicalTerms"],
+        "symptoms": structured["symptoms"],
+        "investigations": structured["investigations"],
+        "medications": structured["medications"],
+        "duration": structured["duration"],
+        "severity": structured["severity"],
+        "reportDraft": build_patient_report_payload(english_text, localized_text, structured)
+    }
+
+
+@app.post("/ai/doctor/live-report")
+async def doctor_live_report(audio: UploadFile = File(...)) -> dict[str, Any]:
+    audio_bytes = await audio.read()
+    english_transcript = whisper_like_transcribe(audio_bytes)
+    return build_doctor_report(english_transcript)
+
+
+@app.post("/ai/doctor/live-report-text")
+def doctor_live_report_text(payload: DoctorLiveTextRequest) -> dict[str, Any]:
+    english_transcript = englishify(payload.text, payload.sourceLanguage)
+    return build_doctor_report(english_transcript)
+
+
+def build_doctor_report(english_transcript: str) -> dict[str, Any]:
+    structured = structured_medical_data(english_transcript)
+    report = {
+        "chiefComplaint": english_transcript,
+        "symptoms": structured["symptoms"],
+        "duration": structured["duration"],
+        "severity": structured["severity"],
+        "medicalTerms": structured["medicalTerms"],
+        "doctorNote": "AI draft prepared from multilingual speech using Whisper transcription and BioBERT-style medical term extraction."
+    }
+    return {
+        "englishTranscript": english_transcript,
+        "medicalTerms": structured["medicalTerms"],
+        "symptoms": structured["symptoms"],
+        "duration": structured["duration"],
+        "severity": structured["severity"],
+        "reportDraft": json.dumps(report)
+    }
